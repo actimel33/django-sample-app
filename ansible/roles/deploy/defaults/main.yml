@@ -1,0 +1,12 @@
+---
+app_user: django
+app_dir: /opt/django-sample-app
+app_src: "{{ app_dir }}/src"
+app_venv: "{{ app_dir }}/venv"
+app_env_file: "{{ app_dir }}/app.env"
+app_port: 8000
+app_version: main
+deployment_environment: production
+
+# Запасное значение, если values/main.yml не задаёт настройки.
+django_additional_settings: {}

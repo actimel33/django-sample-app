@@ -1,0 +1,48 @@
+---
+# Точка входа роли деплоя. Порядок здесь ВАЖЕН.
+- name: Значения выката
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/values/main.yml"
+  tags: [deploy, always]
+
+- name: Настройки приложения
+  ansible.builtin.import_tasks: envs.yml
+  tags: [deploy, config]
+
+- name: Код и зависимости
+  ansible.builtin.import_tasks: packages.yml
+  tags: [deploy, code]
+
+# Task 2: модуль вызывается после обновления кода и до миграций —
+# migrate подключается к базе по настройкам, которые он пишет.
+- name: Configure Django Application Settings
+  django_configurator:
+    project_path: "{{ app_src }}"
+    environment: "{{ deployment_environment }}"
+    db_host: "{{ app_params.db_host }}"
+    db_name: "{{ app_params.db_name }}"
+    db_user: "{{ app_params.db_user }}"
+    db_password: "{{ app_params.db_password }}"
+    allowed_hosts:
+      - "{{ app_params.alb_dns_name }}"
+      - "{{ ansible_default_ipv4.address }}"
+    additional_settings: "{{ django_additional_settings }}"
+    owner: root
+    group: "{{ app_user }}"
+    mode: "0640"
+  register: config_result
+  notify: Restart django
+  tags: [deploy, config]
+
+- name: Output Configuration Result
+  ansible.builtin.debug:
+    msg: "{{ config_result.message }}"
+  tags: [deploy, config]
+
+- name: Статика и миграции
+  ansible.builtin.import_tasks: migration.yml
+  tags: [deploy, migrate]
+
+- name: Запуск приложения
+  ansible.builtin.import_tasks: run-server.yml
+  tags: [deploy, server]

@@ -1,0 +1,15 @@
+---
+# Точка входа роли. Здесь только подключение остальных файлов — логики нет.
+- name: Установка PostgreSQL
+  ansible.builtin.import_tasks: packages.yml
+  tags: [postgres, packages]
+#
+- name: Пользователь, база и доступ
+  ansible.builtin.import_tasks: configure-db.yml
+  tags: [postgres, config]
+#
+# import_tasks против include_tasks
+#   import_tasks подставляется на этапе разбора плейбука — теги работают
+#     на вложенных задачах, ошибки видны сразу
+#   include_tasks подставляется во время выполнения — нужен, если имя файла
+#     зависит от переменной или от результата предыдущей задачи

@@ -1,0 +1,37 @@
+---
+- name: systemd-служба приложения
+  ansible.builtin.template:
+    src: django.service.j2
+    dest: /etc/systemd/system/django.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart django
+
+- name: Запуск и автозапуск приложения
+  ansible.builtin.systemd:
+    name: django
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Конфиг nginx
+  ansible.builtin.copy:
+    src: nginx.conf
+    dest: /etc/nginx/conf.d/django.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Применить перезапуски сейчас
+  ansible.builtin.meta: flush_handlers
+
+- name: Приложение отвечает так, как его проверяет ALB
+  ansible.builtin.uri:
+    url: "http://{{ ansible_default_ipv4.address }}/api/v3/status/"
+    status_code: 200
+  register: app_health
+  retries: 10
+  delay: 3
+  until: app_health.status == 200

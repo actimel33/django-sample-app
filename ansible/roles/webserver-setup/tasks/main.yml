@@ -1,0 +1,12 @@
+---
+# Точка входа роли. Только подключения.
+- name: Python и системные пакеты
+  ansible.builtin.import_tasks: python-install.yml
+  tags: [webserver, python]
+
+- name: nginx
+  ansible.builtin.import_tasks: nginx-install.yml
+  tags: [webserver, nginx]
+#
+# ПОРЯДОК ВАЖЕН: nginx будет проксировать на Django, но сам Django запустит
+# роль deploy. Здесь ставим только то, что не зависит от версии приложения.

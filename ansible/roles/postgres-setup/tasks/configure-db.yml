@@ -1,0 +1,52 @@
+---
+# Создание пользователя, базы и настройка доступа по сети.
+- name: Чтение реквизитов базы из Parameter Store
+  ansible.builtin.command:
+    cmd: >-
+      aws ssm get-parameter --name "{{ ssm_param_prefix }}/{{ item }}"
+      --with-decryption --region "{{ aws_region }}"
+      --query Parameter.Value --output text
+  loop: [db_name, db_user, db_password, app_subnet_cidrs]
+  register: postgres_ssm
+  changed_when: false
+  check_mode: false   # только чтение
+  no_log: true
+
+- name: Реквизиты в одну переменную
+  ansible.builtin.set_fact:
+    postgres_params: "{{ postgres_ssm.results | items2dict(key_name='item', value_name='stdout') }}"
+  no_log: true
+
+- name: Слушать сеть, а не только localhost
+  ansible.builtin.lineinfile:
+    path: "{{ postgres_data_dir }}/postgresql.conf"
+    regexp: '^#?listen_addresses\s*='
+    line: "listen_addresses = '{{ postgres_listen_addresses }}'"
+  notify: Restart postgresql
+
+- name: Пускать приложение из его подсетей
+  community.postgresql.postgresql_pg_hba:
+    dest: "{{ postgres_data_dir }}/pg_hba.conf"
+    contype: host
+    databases: "{{ postgres_params.db_name }}"
+    users: "{{ postgres_params.db_user }}"
+    source: "{{ item }}"
+    method: "{{ postgres_auth_method }}"
+  loop: "{{ postgres_params.app_subnet_cidrs.split(',') }}"
+  notify: Restart postgresql
+
+- name: Перезапуск сейчас, если конфиги менялись
+  ansible.builtin.meta: flush_handlers
+
+- name: Пользователь приложения
+  community.postgresql.postgresql_user:
+    name: "{{ postgres_params.db_user }}"
+    password: "{{ postgres_params.db_password }}"
+  become_user: postgres
+  no_log: true
+
+- name: База приложения, владелец — пользователь приложения
+  community.postgresql.postgresql_db:
+    name: "{{ postgres_params.db_name }}"
+    owner: "{{ postgres_params.db_user }}"
+  become_user: postgres

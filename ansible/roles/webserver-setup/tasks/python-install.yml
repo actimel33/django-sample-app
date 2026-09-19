@@ -1,0 +1,28 @@
+---
+# Python и системные зависимости для сборки пакетов.
+- name: Python 3.12 и системные зависимости приложения
+  ansible.builtin.dnf:
+    name: "{{ webserver_packages }}"
+    state: present
+
+- name: Системный пользователь приложения
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ app_dir }}"
+    create_home: false
+
+- name: Каталог приложения
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+
+- name: Виртуальное окружение на Python 3.12
+  ansible.builtin.command:
+    cmd: "{{ webserver_python }} -m venv {{ app_venv }}"
+    creates: "{{ app_venv }}/bin/python"
+  become_user: "{{ app_user }}"

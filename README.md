@@ -1,3 +1,267 @@
+# Week 4 · Tasks 1 and 2 — Terraform + Ansible через AWS Systems Manager
+
+## Задача
+
+Поднять Terraform'ом инфраструктуру для Django-приложения [healthchecks](https://github.com/kaaalim/django-sample-app) — VPC, два сервера приложения и сервер базы в приватных подсетях, балансировщик — и настроить серверы тремя ролями Ansible, запущенными через AWS Systems Manager. Task 2 — свой модуль Ansible `django_configurator`, который пишет настройки подключения приложения к базе.
+
+## Архитектура
+
+```
+                        интернет
+                           │ 80
+              ┌────────────▼────────────┐
+              │  Application Load       │   публичные подсети
+              │  Balancer               │   + NAT-шлюз
+              └──────┬───────────┬──────┘
+                     │ 80        │ 80
+        ┌────────────▼──┐   ┌────▼──────────┐
+        │ app-1         │   │ app-2         │   приватные подсети
+        │ nginx         │   │ nginx         │   (две AZ)
+        │ gunicorn      │   │ gunicorn      │
+        └────────┬──────┘   └──────┬────────┘
+                 │ 5432            │ 5432
+              ┌──▼─────────────────▼──┐
+              │ db: PostgreSQL 17     │
+              └───────────────────────┘
+
+  AWS Systems Manager ──State Manager──> Ansible на каждом сервере
+  SSM Parameter Store ──> пароль базы, SECRET_KEY, адреса
+  S3 ──> плейбуки для SSM, логи запусков
+```
+
+## Что развёрнуто
+
+| Компонент | Как сделано |
+|---|---|
+| Сеть | VPC `10.60.0.0/16`, по две публичные и приватные подсети в разных AZ, интернет-шлюз, один NAT-шлюз |
+| Серверы | 3 × `t3.micro`, Amazon Linux 2023 (SSM Agent предустановлен), IMDSv2 обязателен, диски зашифрованы, публичных IP нет |
+| Security groups | цепочка ALB → app → db, правила ссылаются на группы, а не на адреса. SSH не открыт нигде |
+| Балансировщик | ALB, health check `/api/v3/status/` — эндпоинт приложения, который делает `SELECT 1` в базе |
+| IAM | роль инстансов: `AmazonSSMManagedInstanceCore` + чтение и запись одного бакета + чтение параметров одного префикса |
+| Секреты | пароль базы и `SECRET_KEY` генерирует Terraform (`random_password`) и кладёт в Parameter Store как `SecureString` |
+| Запуск Ansible | 3 ассоциации State Manager на документе `AWS-ApplyAnsiblePlaybooks` |
+| Инвентарь | `ansible/inventory.ini` генерирует Terraform: хосты по ID инстансов, подключение `amazon.aws.aws_ssm` |
+| Роли | `postgres-setup`, `webserver-setup`, `deploy` |
+| Task 2 | модуль `ansible/library/django_configurator.py` |
+
+## Структура репозитория
+
+```
+├── ansible
+│   ├── db.yml                    плейбук сервера базы
+│   ├── webservers.yml            плейбук подготовки серверов приложения
+│   ├── deploy.yml                плейбук выката, serial: 1
+│   ├── inventory.ini             генерирует Terraform
+│   ├── library
+│   │   └── django_configurator.py   Task 2
+│   └── roles
+│       ├── postgres-setup        PostgreSQL, пользователь, база, pg_hba
+│       ├── webserver-setup       Python 3.12, venv, пользователь, nginx
+│       └── deploy                код, зависимости, настройки, миграции, запуск
+│           ├── files/nginx.conf
+│           ├── templates/app.env.j2
+│           ├── templates/django.service.j2   сверх схемы: юнит systemd
+│           └── values/main.yml   подключается явно через include_vars
+└── terraform
+    ├── providers.tf              версии, backend S3, данные AMI
+    ├── variables.tf
+    ├── vpc.tf
+    ├── ec2.tf                    security groups и инстансы
+    ├── alb.tf
+    ├── iam.tf
+    ├── ssm.tf                    бакет, Parameter Store, ассоциации State Manager
+    ├── outputs.tf                выходы и генерация inventory.ini
+    └── terraform.tfvars          enable_ssm_associations = true
+```
+
+Каждый ресурс в `.tf` отделён рамкой `################` с его адресом, группы ресурсов — широкими заголовками с пояснениями.
+
+## Как запустить
+
+**Нужно:** Terraform ≥ 1.10, AWS CLI v2, `session-manager-plugin`, `ansible-core` с коллекциями `amazon.aws` и `community.postgresql`, библиотеки `boto3` и `botocore` в том Python, которым работает Ansible, и AWS-ключи с правами администратора в текущем терминале.
+
+Backend состояния — S3-бакет из `terraform/providers.tf`. Для своего аккаунта замени имя бакета или удали блок `backend`.
+
+**1. Инфраструктура без ассоциаций** — сначала серверы должны появиться в Systems Manager:
+
+```bash
+cd terraform && terraform init && terraform apply -var enable_ssm_associations=false
+```
+
+**2. Проверить, что все три сервера видны в Systems Manager** (через 1–3 минуты после apply):
+
+```bash
+aws ssm describe-instance-information --query 'InstanceInformationList[].[InstanceId,PingStatus]' --output text
+```
+
+Ожидаем три строки `Online`.
+
+**3. Ассоциации State Manager** — `terraform.tfvars` включает их:
+
+```bash
+terraform apply
+```
+
+Apply идёт 10–30 минут: Terraform ждёт, пока каждый сервер сам поставит Ansible и прогонит плейбуки — сначала `db.yml` и `webservers.yml`, потом `deploy.yml` по одному серверу.
+
+**4. Проверить приложение:**
+
+```bash
+curl -s "http://$(terraform output -raw alb_dns_name)/accounts/login/" | grep -o '<title>[^<]*'
+```
+
+Ожидаем `<title>Log In - Week 4 Healthchecks`.
+
+**5. Создать пользователя.** Почта не настроена, поэтому регистрация по ссылке из письма не работает — пользователь создаётся командой приложения на любом сервере приложения. ID серверов:
+
+```bash
+terraform output app_instance_ids
+```
+
+Открыть сессию на любом из них, подставив ID:
+
+```bash
+aws ssm start-session --target i-0123456789abcdef0
+```
+
+Внутри сессии — команда спросит email и пароль:
+
+```bash
+sudo -u django bash -c 'cd /opt/django-sample-app/src && set -a && . ../app.env && set +a && ../venv/bin/python manage.py createsuperuser'
+```
+
+**6. Удалить всё:**
+
+```bash
+terraform destroy
+```
+
+Проверенный путь — два apply, как выше. Запуск с нуля одним `terraform apply` с включёнными ассоциациями не проверялся.
+
+**Ручной запуск ролей для отладки** — с машины через инвентарь из Terraform, без SSH:
+
+```bash
+cd ansible && ansible -i inventory.ini all -m ping
+```
+
+```bash
+ansible-playbook -i inventory.ini deploy.yml --limit webservers
+```
+
+## Три роли
+
+| Роль | Хосты | Что делает | Как часто меняется |
+|---|---|---|---|
+| `postgres-setup` | `Role=db` | PostgreSQL 17, пользователь и база, доступ только из подсетей приложения | раз за жизнь сервера |
+| `webserver-setup` | `Role=app` | Python 3.12, `git`, `libpq`, пользователь `django`, venv, nginx | раз за жизнь сервера |
+| `deploy` | `Role=app` | код, зависимости, `local_settings.py`, миграции, gunicorn, конфиг nginx | каждый релиз |
+
+Роли разделены по частоте изменений: первые две описывают состояние машины, третья — версию приложения. Подробности, входы и ограничения — в README каждой роли.
+
+## Как роли запускаются через SSM
+
+Три ассоциации State Manager на документе `AWS-ApplyAnsiblePlaybooks`. Документ скачивает каталог `ansible/` из S3 на сервер, ставит Ansible через `pip` и запускает `ansible-playbook -i "localhost," -c local` — **каждый сервер настраивает сам себя**. Поэтому в плейбуках `hosts: all`, а какой плейбук где выполнять, определяет цель ассоциации по тегу `Role`.
+
+| Ассоциация | Плейбук | Цель | `max_concurrency` | `max_errors` |
+|---|---|---|---|---|
+| `week4-dev-db` | `db.yml` | `tag:Role=db` | 1 | 0 |
+| `week4-dev-webservers` | `webservers.yml` | `tag:Role=app` | 2 | 0 |
+| `week4-dev-deploy` | `deploy.yml` | `tag:Role=app` | **1** | 0 |
+
+**Порядок.** Ассоциация запускает плейбук сразу при создании, но Terraform считает её созданной, как только ответил API, — обычный `depends_on` порядок не гарантирует. С `wait_for_success_timeout_seconds` Terraform ждёт статус `Success`, а ассоциация `deploy` зависит от базовых и создаётся только после их успеха. Проверено по времени: `db` и `webservers` стартовали в 08:24:17 и завершились к 08:25:25, `deploy` создана в 08:25:31, серверы обновились в 08:26:03 и 08:26:34 — строго по очереди.
+
+**Повторные запуски.** Ожидание работает только при создании ассоциации, а правка файла роли в S3 ассоциацию не меняет. Поэтому у каждой ассоциации `replace_triggered_by` на ресурс `terraform_data` с хешем файлов своего плейбука, параметров, ID целевых серверов и версий нужных параметров Parameter Store. Поправил роль `deploy` → `terraform apply` → пересоздаётся только ассоциация `deploy`, с ожиданием и в правильном порядке. Повторный `terraform plan` без изменений пустой.
+
+**Секреты не передаются параметрами документа.** У параметра `ExtraVariables` есть `allowedPattern`, запрещающий `| : ( ) ; &` и пробелы внутри значения, а параметры ассоциации видны в консоли. Через него идут только `ssm_param_prefix`, `aws_region`, `app_version`, `deployment_environment`; остальное роли читают из Parameter Store на сервере.
+
+**Два способа запуска.** State Manager — основной, его требует задание. Плагин `amazon.aws.aws_ssm` с машины разработчика — для отладки ролей: тот же Systems Manager вместо SSH, но итерация за секунды, а не минуты. Инвентарь из Terraform используется именно этим способом.
+
+## Миграции на двух серверах
+
+Серверов приложения два, база одна, межпроцессной блокировки миграций в Django нет. Выбран **выкат по одному серверу**: первый применяет миграции, на втором `migrate` печатает `No migrations to apply`.
+
+- через SSM — `max_concurrency = "1"` у ассоциации `deploy`
+- с машины — `serial: 1` в `deploy.yml`
+
+`run_once` не подходит: через SSM каждый сервер запускает плейбук для себя и соседа не видит. Флаг `run_migrations=true` для одного сервера отвергнут: пересоздали этот сервер — миграции тихо перестали выполняться. `max_errors = "0"` останавливает выкат на первой ошибке, остальные серверы остаются на старой версии. Следствие — миграции должны быть обратно совместимыми.
+
+## Task 2 — модуль `django_configurator`
+
+**Генерирует `hc/local_settings.py`, а не правит `settings.py`.** Задание говорит «generate or modify the settings.py file», но `settings.py` приходит из git — правка конфликтовала бы с каждым обновлением кода. У приложения есть штатная точка расширения: последние строки `settings.py` подключают `local_settings.py`, если он существует. Модуль собирает содержимое этого файла целиком и сравнивает с диском — отсюда идемпотентность.
+
+**Входы:** `environment`, `db_host`, `db_name`, `db_user`, `db_password`, `additional_settings` из задания, плюс `project_path` (модуль выполняется на сервере и не знает, где проект), `allowed_hosts`, `db_port`, `settings_package` и стандартные `owner`, `group`, `mode`. Без `mode` файл получает `0600`: в нём пароль.
+
+**Выходы:** `message` — печатается задачей из задания; `changes` — отчёт `{added, removed, modified}` с **именами** настроек, значения не возвращаются никогда.
+
+**Ошибки:** нет каталога проекта; нет `settings.py`; `settings.py` не подключает `local_settings` (сгенерированный файл был бы проигнорирован); пустые реквизиты; порт вне диапазона; production без `allowed_hosts`; настройка в нижнем регистре; попытка задать `DEBUG`, `ALLOWED_HOSTS` или `DATABASES` через `additional_settings`; нет прав на запись. В production с `ALLOWED_HOSTS = ['*']` — предупреждение.
+
+**Как проверено:**
+
+- 37 функциональных проверок запуском модуля так, как его запускает Ansible — JSON на stdin: создание, идемпотентность, check mode, diff, изменение и удаление настроек, права файла, все ветки ошибок
+- в `--diff` пароль заменён на `********`, в ответах модуля пароля нет
+- `ansible-doc` разбирает документацию, синтаксис совместим с Python 3.9 — системным Python серверов
+- на серверах через SSM: `Django settings in /opt/django-sample-app/src/hc/local_settings.py are already up to date`, отчёт изменений пустой
+- на странице входа название `Week 4 Healthchecks` из `additional_settings` — значит файл реально подключается
+
+Вызов модуля стоит в `ansible/roles/deploy/tasks/main.yml` после обновления кода и до миграций: `migrate` подключается к базе по настройкам, которые пишет модуль.
+
+## Как проверено
+
+| Проверка | Результат |
+|---|---|
+| серверы в Systems Manager | 3 × `Online` |
+| ассоциации State Manager | 3 × `Success`, в логах всех плейбуков `failed=0` |
+| повторный `terraform plan` | `No changes` |
+| идемпотентность ролей (запуск через SSM на настроенных серверах) | `postgres-setup` ok=10 changed=0, `webserver-setup` ok=7 changed=0, `deploy` ok=17 changed=0 |
+| цели балансировщика | обе `healthy` |
+| приложение через ALB | `/accounts/login/` и `/api/v3/status/` — 200, CSS и JS из `compress` — 200 |
+| распределение нагрузки | 10 запросов: 4 на один сервер, 6 на другой |
+| база | 205 применённых миграций, 23 таблицы, владелец `hc`, файлов SQLite на серверах нет |
+| что видит Django | `postgresql`, `DEBUG=False`, настройки из `local_settings.py` |
+| секреты в логах SSM | пароля базы и `SECRET_KEY` нет ни в одном файле (поиск по настоящим значениям) |
+| версия Ansible, которую поставил SSM | `ansible 8.7.0` / `ansible-core 2.15.13` |
+
+## Что пошло не так
+
+**`ExtraVariables` не принимает URL.** Первая версия передавала адрес репозитория в `ExtraVariables`. Содержимое документа (`aws ssm get-document`) показало `allowedPattern`, запрещающий двоеточие даже в кавычках, — ассоциация упала бы на `terraform apply`. URL, адрес ALB и реквизиты перенесены в Parameter Store.
+
+**Health check на `/` никогда не стал бы зелёным.** Главная страница для анонимного пользователя отдаёт 302 на страницу входа. Используется `/api/v3/status/` — он ещё и проверяет базу.
+
+**Системный Python не подходит приложению.** На Amazon Linux 2023 Python 3.9, а Django 6.1 требует ≥ 3.12. Приложение работает в venv на `python3.12` из репозитория, Ansible — на системном 3.9.
+
+**`git clone` в непустой каталог.** Заготовка клала venv внутрь каталога кода — клонирование упало бы. Код и окружение разнесены: `/opt/django-sample-app/src` и `/opt/django-sample-app/venv`.
+
+**`depends_on` не ждёт плейбук.** Ассоциации создавались параллельно, и `deploy` мог стартовать раньше, чем появится PostgreSQL. Решено так: `wait_for_success_timeout_seconds` заставляет Terraform ждать статус `Success`, а `replace_triggered_by` пересоздаёт ассоциацию при изменении роли, чтобы ожидание срабатывало и на повторных запусках.
+
+**Check mode врал.** В `--check` Ansible пропускает `command`, включая задачу, которая только читает Parameter Store; шаблоны дальше рендерились с пустыми значениями и показывали ложный `changed`. Читающие задачи получили `check_mode: false`.
+
+**Инвентарь с отступами.** Шаблон `%{for}` внутри heredoc `<<-` не срезал отступ, строки хостов уезжали на 4 пробела. Проверено рендером на тестовых данных, заменено на `join`.
+
+**Подсказки заготовки не совпали с реальностью.** `psycopg2-binary` через pip в системный Python, `gcc` и `libcurl-devel` «для сборки `pycurl`» — проверка по PyPI показала готовые wheel для всех C-зависимостей, а драйвер для модулей Ansible есть пакетом `python3-psycopg2`.
+
+**`Unable to locate credentials` при ручном запуске.** Плагин `aws_ssm` работает на машине разработчика и падает на первой задаче, если в терминале не подключены AWS-ключи.
+
+## Что осталось незакрытым
+
+| Пробел | Почему так | Что было бы в production |
+|---|---|---|
+| HTTP без TLS | нет домена и сертификата | ACM-сертификат, слушатель 443, редирект с 80 |
+| один NAT-шлюз | стоимость учебного стенда | NAT в каждой AZ |
+| PostgreSQL на EC2, без бэкапов и реплик | требование задания | RDS Multi-AZ со снапшотами |
+| выкат без снятия сервера с балансировщика | простота | вывод цели из target group на время выката или blue/green |
+| нет отката релиза | простота | каталоги релизов с переключением симлинка или образы |
+| версия Ansible на серверах не закреплена | `InstallDependencies` ставит последнюю совместимую | свой SSM-документ или AMI с закреплённой версией |
+| выкатывается ветка `main` | учебный стенд | тег или коммит |
+| деплой запускается `terraform apply` | одна точка входа для стенда | CI вызывает `aws ssm start-associations-once` |
+| секреты есть в state Terraform | так работает `random_password` | state в S3 зашифрован и закрыт IAM; секреты с ротацией в Secrets Manager |
+| `manage.py sendalerts` не запущен | задание не требует | вторая systemd-служба |
+| регистрация открыта (`REGISTRATION_OPEN`) | без почты её не завершить | `REGISTRATION_OPEN: false` через `additional_settings` |
+| `pg_hba.conf` не очищается от убранных подсетей | роль только добавляет правила | `state: absent` для устаревших правил |
+
+---
+
+> Ниже — исходный README приложения healthchecks.
+
 # Healthchecks
 
 [![Tests](https://example.com/repo/actions/workflows/tests.yml/badge.svg)](https://example.com/repo/actions/workflows/tests.yml)

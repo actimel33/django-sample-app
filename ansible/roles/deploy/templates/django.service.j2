@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Healthchecks Django application (gunicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ app_user }}
+Group={{ app_user }}
+WorkingDirectory={{ app_src }}
+EnvironmentFile={{ app_env_file }}
+ExecStart={{ app_venv }}/bin/gunicorn hc.wsgi:application --bind 127.0.0.1:{{ app_port }} --workers {{ gunicorn_workers }} --access-logfile -
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+---
+# Плейбук выката приложения.
+# Запускается при каждом релизе, в отличие от webservers.yml.
+- name: Deploy application
+  hosts: all
+  become: true
+  serial: 1
+  roles:
+    - deploy

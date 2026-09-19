@@ -1,0 +1,11 @@
+---
+# Каталог values/ есть в схеме задания, но СТАНДАРТНЫМ КАТАЛОГОМ РОЛИ ANSIBLE НЕ ЯВЛЯЕТСЯ.
+# Ansible автоматически подхватывает только defaults/ и vars/, поэтому
+# файл подключается явно через include_vars в tasks/main.yml.
+# Здесь параметры конкретного выката.
+gunicorn_version: "26.2.0"
+gunicorn_workers: 3
+
+# Уходят в модуль django_configurator и попадают в hc/local_settings.py.
+django_additional_settings:
+  SITE_NAME: Week 4 Healthchecks

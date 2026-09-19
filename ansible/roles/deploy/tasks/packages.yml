@@ -1,0 +1,24 @@
+---
+# Код приложения и его зависимости.
+- name: Код приложения из GitHub
+  ansible.builtin.git:
+    repo: "{{ app_params.app_repo }}"
+    dest: "{{ app_src }}"
+    version: "{{ app_version }}"
+    force: true
+  become_user: "{{ app_user }}"
+  notify: Restart django
+
+- name: Зависимости приложения
+  ansible.builtin.pip:
+    requirements: "{{ app_src }}/requirements.txt"
+    virtualenv: "{{ app_venv }}"
+  become_user: "{{ app_user }}"
+  notify: Restart django
+
+- name: gunicorn
+  ansible.builtin.pip:
+    name: "gunicorn=={{ gunicorn_version }}"
+    virtualenv: "{{ app_venv }}"
+  become_user: "{{ app_user }}"
+  notify: Restart django

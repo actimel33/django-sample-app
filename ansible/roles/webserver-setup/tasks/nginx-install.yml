@@ -1,0 +1,12 @@
+---
+# nginx как обратный прокси: порт 80 снаружи → порт 8000 Django внутри.
+- name: Установка nginx
+  ansible.builtin.dnf:
+    name: nginx
+    state: present
+
+- name: Запуск и автозапуск nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true

@@ -1,0 +1,26 @@
+---
+- name: Restart django
+  ansible.builtin.systemd:
+    name: django
+    state: restarted
+    daemon_reload: true
+
+- name: Проверка конфига nginx
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  listen: Reload nginx
+
+- name: Перечитать конфиг nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded
+  listen: Reload nginx
+#
+# КОГДА ИХ ЗОВУТ
+#   restart django — после изменения .env или local_settings.py
+#   restart nginx  — после изменения его конфигурации
+#
+# ЛОВУШКА С ПОРЯДКОМ
+#   Обработчики выполняются в порядке ОБЪЯВЛЕНИЯ в этом файле,
+#   а не в порядке вызова через notify. Если важна последовательность —
+#   объявлять в нужном порядке.

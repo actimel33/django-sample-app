@@ -1,0 +1,27 @@
+---
+# Порядок из README приложения: compress → collectstatic → migrate.
+# Миграции на каждом сервере, по одному: serial: 1 в deploy.yml,
+# max_concurrency = 1 у ассоциации в ssm.tf.
+
+- name: Сборка JS/CSS-бандлов
+  ansible.builtin.shell:
+    cmd: set -a && . {{ app_env_file }} && set +a && exec {{ app_venv }}/bin/python manage.py compress --force
+    chdir: "{{ app_src }}"
+  become_user: "{{ app_user }}"
+  changed_when: false
+
+- name: Сбор статики
+  ansible.builtin.shell:
+    cmd: set -a && . {{ app_env_file }} && set +a && exec {{ app_venv }}/bin/python manage.py collectstatic --noinput
+    chdir: "{{ app_src }}"
+  become_user: "{{ app_user }}"
+  register: collectstatic
+  changed_when: collectstatic.stdout is not search('^0 static files copied', multiline=True)
+
+- name: Миграции базы
+  ansible.builtin.shell:
+    cmd: set -a && . {{ app_env_file }} && set +a && exec {{ app_venv }}/bin/python manage.py migrate --noinput
+    chdir: "{{ app_src }}"
+  become_user: "{{ app_user }}"
+  register: migrate
+  changed_when: "'No migrations to apply' not in migrate.stdout"

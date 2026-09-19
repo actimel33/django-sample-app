@@ -1,0 +1,28 @@
+---
+# Конфигурация приложения: чтение Parameter Store и файл окружения.
+- name: Чтение настроек приложения из Parameter Store
+  ansible.builtin.command:
+    cmd: >-
+      aws ssm get-parameter --name "{{ ssm_param_prefix }}/{{ item }}"
+      --with-decryption --region "{{ aws_region }}"
+      --query Parameter.Value --output text
+  loop: [db_host, db_name, db_user, db_password, app_repo, django_secret_key, alb_dns_name]
+  register: app_ssm
+  changed_when: false
+  check_mode: false   # только чтение, выполнять и в --check, иначе дальше пустые значения
+  no_log: true
+
+- name: Параметры в словарь
+  ansible.builtin.set_fact:
+    app_params: "{{ app_ssm.results | items2dict(key_name='item', value_name='stdout') }}"
+  no_log: true
+
+- name: Файл окружения приложения
+  ansible.builtin.template:
+    src: app.env.j2
+    dest: "{{ app_env_file }}"
+    owner: root
+    group: "{{ app_user }}"
+    mode: "0640"
+  no_log: true
+  notify: Restart django

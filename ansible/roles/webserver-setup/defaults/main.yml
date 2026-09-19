@@ -1,0 +1,5 @@
+---
+app_user: django
+app_dir: /opt/django-sample-app
+app_venv: "{{ app_dir }}/venv"
+
