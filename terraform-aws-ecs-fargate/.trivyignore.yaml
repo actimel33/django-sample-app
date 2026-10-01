@@ -1,0 +1,74 @@
+# Findings accepted on purpose. Each needs a reason and an expiry date, so an
+# exception cannot outlive the reason it was made for.
+
+misconfigurations:
+  - id: AWS-0053
+    paths: ["alb.tf"]
+    statement: >-
+      The load balancer is internet-facing by design: it is the only public
+      entry point, and the tasks behind it accept traffic from it alone.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0054
+    paths: ["alb.tf"]
+    statement: >-
+      Plain HTTP listener. The stand has no domain, and without one there is no
+      ACM certificate. Closed by a domain in Route 53 and an HTTPS listener.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0104
+    paths: ["vpc.tf"]
+    statement: >-
+      Outbound HTTPS to any address. The task needs ECR, CloudWatch Logs and
+      Secrets Manager, whose ranges are not fixed. Port 80 is closed and the
+      traffic leaves through the NAT gateway.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0031
+    paths: ["ecs.tf"]
+    statement: >-
+      Mutable image tags. The image is rebuilt many times a day here; immutable
+      tags would mean a new version per Dockerfile edit. Production uses a tag
+      per commit hash.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0177
+    paths: ["db.tf"]
+    statement: >-
+      Deletion protection is off: the stand is destroyed repeatedly and the
+      protection would block it.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0178
+    paths: ["vpc.tf"]
+    statement: >-
+      VPC flow logs are off. Storage is billed and this stand handles no real
+      data. Enabled in week 5, where the infrastructure was about compliance.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0098
+    paths: ["db.tf"]
+    statement: >-
+      The secret uses the default AWS key. A customer managed key costs a dollar
+      a month and pays off where the key needs its own access policy; here one
+      role reads the secret.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0017
+    paths: ["ecs.tf"]
+    statement: >-
+      Logs use the default AWS key, same reasoning as above.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0033
+    paths: ["ecs.tf"]
+    statement: >-
+      The registry uses the default AWS key, same reasoning as above.
+    expiration_date: 2026-12-31
+
+  - id: AWS-0034
+    paths: ["ecs.tf"]
+    statement: >-
+      Container Insights is off: metric collection is billed and task logs are
+      enough for a stand of this size.
+    expiration_date: 2026-12-31

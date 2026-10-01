@@ -1,0 +1,30 @@
+# Build context: everything here is sent to the daemon before the first
+# instruction, so keeping it small keeps builds fast.
+
+.git
+.github
+.gitignore
+
+# Markdown stays: the app reads CHANGELOG.md on its "what's new" page and
+# collectstatic fails without it.
+
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+*.db
+*.sqlite3
+.env
+.env.*
+local_settings.py
+
+terraform-aws-ecs-fargate
+
+.idea
+.vscode
+.DS_Store
+*:Zone.Identifier
