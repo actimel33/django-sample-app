@@ -80,10 +80,13 @@ field in the container definition. Without it the platform knows the process is
 alive and nothing more — a hung application with an open port would never be
 replaced.
 
-**Read-only root filesystem.** The container cannot write to its own filesystem;
-a volume is mounted at `/tmp` instead. One consequence is worth knowing: that
-volume belongs to root, while the application runs as uid 10001, so the image
-points `TMPDIR` at `/dev/shm`, which Fargate mounts as a world-writable tmpfs.
+**Read-only root filesystem.** The container cannot write to its own code. Two
+volumes cover the paths it does write to: `/app/tmp` for temporary files and
+`/app/run` for gunicorn's runtime state. Both directories exist in the image and
+belong to the application user, so the mounts inherit that ownership — a volume
+mounted over a path that does not exist in the image would belong to root and be
+unusable. `/dev/shm` is used only for gunicorn worker state, since Fargate caps
+it at 64 MB.
 
 ## Known gaps
 

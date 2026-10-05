@@ -50,24 +50,28 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
 
 RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin app
 
-# TMPDIR points at /dev/shm: with a read-only root ECS mounts /tmp as a
-# root-owned volume that uid 10001 cannot write to.
+# Writable paths for a read-only root filesystem.
+# /dev/shm is not used for these: Fargate caps it at 64 MB.
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TMPDIR=/dev/shm \
-    HOME=/dev/shm
+    TMPDIR=/app/tmp \
+    HOME=/app/run
 
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 WORKDIR /app
-COPY --chown=app:app . .
+# Files stay owned by root
+COPY . .
 
 # COMPRESS_OFFLINE is on: without compress at build time the app fails at runtime.
 RUN python manage.py collectstatic --noinput && \
-    python manage.py compress --force && \
-    chown -R app:app /app/static-collected
+    python manage.py compress --force
+
+# The only writable paths
+RUN mkdir -p /app/tmp /app/run && \
+    chown -R app:app /app/static-collected /app/tmp /app/run
 
 USER app
 
@@ -75,10 +79,6 @@ USER app
 RUN test "$(id -u)" -ne 0 || (echo "image runs as root" && exit 1)
 
 EXPOSE 8000
-
-# Same endpoint the load balancer uses: it queries the database.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v3/status/', timeout=3).status == 200 else 1)"]
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # worker-tmp-dir on tmpfs: gunicorn touches that file on every request.

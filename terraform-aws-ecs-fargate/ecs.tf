@@ -147,9 +147,14 @@ resource "aws_ecs_task_definition" "app" {
     cpu_architecture        = "X86_64"
   }
 
-  # Read-only root with a scratch volume: nothing can be written into the container.
+  # Read-only root. The two volumes below cover the only paths the application
+  # writes to; both exist in the image owned by app, so the mounts inherit that.
   volume {
     name = "tmp"
+  }
+
+  volume {
+    name = "run"
   }
 
   container_definitions = jsonencode([{
@@ -177,11 +182,18 @@ resource "aws_ecs_task_definition" "app" {
       startPeriod = 60
     }
 
-    mountPoints = [{
-      sourceVolume  = "tmp"
-      containerPath = "/tmp"
-      readOnly      = false
-    }]
+    mountPoints = [
+      {
+        sourceVolume  = "tmp"
+        containerPath = "/app/tmp"
+        readOnly      = false
+      },
+      {
+        sourceVolume  = "run"
+        containerPath = "/app/run"
+        readOnly      = false
+      },
+    ]
 
     # Non-secret settings.
     environment = [
