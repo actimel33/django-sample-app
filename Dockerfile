@@ -1,44 +1,69 @@
 # syntax=docker/dockerfile:1
 
 # Django healthchecks, image for ECS Fargate.
-# Two stages: pycurl and psycopg compile from source, the toolchain stays here.
+# Three stages: dependencies, static assets, runtime. Nothing that is only
+# needed to build the image reaches the final one.
 
-################################################
-#                    Build                     #
-################################################
 # Pinned by digest: a tag can move, a digest cannot.
-FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f AS builder
+ARG BASE=python:3.12-slim@sha256:ddb0207ae1f0356c2b724d740769b0c5f5f51cc54a0525178f721825f78fe74c
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        libcurl4-openssl-dev \
-        libssl-dev \
-        libpq-dev
+################################################
+#                 Dependencies                 #
+################################################
+# No compiler here: every dependency but oncalendar (pure Python) ships a
+# manylinux wheel, so build-essential and the -dev headers were dead weight.
+FROM ${BASE} AS deps
 
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-RUN python -m venv "${VIRTUAL_ENV}"
+# uv resolves and installs in parallel, and its venv carries no pip at all.
+COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
 
-# Before the code: copying the code first would invalidate this layer on every
-# edit and rebuild pycurl.
-COPY requirements.txt ./
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}" \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+RUN uv venv "${VIRTUAL_ENV}"
+
+# Before the code: copying the code first would invalidate this layer on every edit.
+COPY requirements.txt /tmp/requirements.txt
 
 # gunicorn is a deployment choice, not an application dependency.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    pip install -r requirements.txt gunicorn==26.2.0
+# compile-bytecode: without it Python recompiles every import on each start,
+# because the runtime filesystem is read-only.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --compile-bytecode -r /tmp/requirements.txt gunicorn==26.2.0
+
+# USE_I18N is False, so the compiled translations are never read. Deleting them
+# in a later layer still pays off: the runtime stage copies this venv as one layer.
+RUN find "${VIRTUAL_ENV}" -name '*.mo' -delete
+
+################################################
+#                Static assets                 #
+################################################
+# COMPRESS_OFFLINE is on: without compress at build time the app fails at runtime.
+# Runs where static/ and the full source tree are available; only the result is
+# carried into the runtime stage.
+FROM deps AS assets
+WORKDIR /app
+COPY . .
+# populate_searchdb rebuilds search.db from templates/docs; the file is a build
+# artifact, so it is generated here instead of being committed.
+RUN python manage.py collectstatic --noinput && \
+    python manage.py compress --force && \
+    python manage.py populate_searchdb
 
 ################################################
 #                   Runtime                    #
 ################################################
-FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+FROM ${BASE}
 
-# Runtime libraries only. upgrade picks up fixes released after the base image;
-# cleanup shares the layer, otherwise the files stay in the image.
+# libpq5 only: psycopg loads libpq at runtime, and pycurl's wheel bundles its
+# own libcurl. upgrade picks up fixes released after the base image; cleanup
+# shares the layer, otherwise the files stay. The base image's pip goes too:
+# unused here, and its CVEs would show up in every scan.
+# No version pin: the upgrade above already moves packages to the latest patch
+# release, and a pin would break whenever the base digest is refreshed.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-        libcurl4 \
         libpq5 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
@@ -46,11 +71,14 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
              /var/cache/debconf/*-old \
              /var/lib/dpkg/*-old \
              /tmp/* \
-    && find /var/log -type f -delete
+    && find /var/log -type f -delete \
+    && rm -rf /usr/local/lib/python3.12/site-packages/pip \
+              /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+              /usr/local/lib/python3.12/ensurepip
 
 RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin app
 
-# Writable paths for a read-only root filesystem.
+# TMPDIR and HOME point at writable paths: the root filesystem is read-only.
 # /dev/shm is not used for these: Fargate caps it at 64 MB.
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:${PATH}" \
@@ -59,21 +87,24 @@ ENV VIRTUAL_ENV=/opt/venv \
     TMPDIR=/app/tmp \
     HOME=/app/run
 
-COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --from=deps ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 WORKDIR /app
-# Files stay owned by root
-COPY . .
+# Only what the application reads at runtime, and it stays owned by root: the
+# process runs as app and must not be able to rewrite its own code.
+COPY hc ./hc
+COPY templates ./templates
+COPY manage.py CHANGELOG.md docker-entrypoint.sh ./
+COPY --from=assets /app/static-collected ./static-collected
+COPY --from=assets /app/search.db ./search.db
 
-# COMPRESS_OFFLINE is on: without compress at build time the app fails at runtime.
-RUN python manage.py collectstatic --noinput && \
-    python manage.py compress --force
+# tmp and run are the only writable paths; volumes mounted over them inherit
+# this ownership. static/ stays empty: the sources are not needed once the
+# assets are built, but Django's checks warn when STATICFILES_DIRS is missing.
+RUN mkdir -p /app/tmp /app/run /app/static && chown app:app /app/tmp /app/run
 
-# The only writable paths
-RUN mkdir -p /app/tmp /app/run && \
-    chown -R app:app /app/static-collected /app/tmp /app/run
-
-USER app
+# Numeric, so a host checking for a non-root user does not need to resolve the name.
+USER 10001
 
 # Fails the build if the image ends up running as root.
 RUN test "$(id -u)" -ne 0 || (echo "image runs as root" && exit 1)

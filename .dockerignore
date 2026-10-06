@@ -28,3 +28,8 @@ terraform-aws-ecs-fargate
 .vscode
 .DS_Store
 *:Zone.Identifier
+
+# Our own week-6 deliverables and local dev helpers: never needed in the image.
+docs
+stuff
+requirements-dev.txt
