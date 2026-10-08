@@ -1,0 +1,70 @@
+# Local development: the application and its database with one command.
+# Builds the dev stage of the same Dockerfile that produces the production image.
+
+name: healthchecks
+
+x-app: &app
+  build:
+    context: .
+    target: dev
+  image: healthchecks-dev
+  # Host ids, so files created in the bind mount belong to the developer, not root.
+  user: "${APP_UID:-1000}:${APP_GID:-1000}"
+  env_file: .env
+  environment:
+    DB: postgres
+    DB_HOST: db
+  volumes:
+    - .:/app
+
+services:
+  db:
+    # Same major version as RDS in terraform-aws-ecs-fargate.
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-hc}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?copy .env.example to .env}
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      # TCP with an explicit user and databas.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+      start_interval: 1s
+
+  migrate:
+    <<: *app
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    <<: *app
+    ports:
+      # Loopback only: the development server must not be reachable from the LAN.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v3/status/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+      start_interval: 1s
+    develop:
+      watch:
+        - action: rebuild
+          path: requirements.txt
+        - action: rebuild
+          path: Dockerfile
+
+volumes:
+  db-data:

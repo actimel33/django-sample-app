@@ -1,0 +1,16 @@
+# Local configuration and secrets: .env holds the database password.
+.env
+.env.*
+!.env.example
+
+# Python bytecode and virtualenvs. The dev container writes into the bind-mount,
+# so these show up in the working tree.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated locally by manage.py.
+static-collected/
+*.sqlite
+*.sqlite3
