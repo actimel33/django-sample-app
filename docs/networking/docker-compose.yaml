@@ -1,0 +1,39 @@
+# Docker networking demo. The services are identical busybox web servers; only
+# the networks they are attached to differ.
+#
+#   frontend (bridge)                backend (bridge, internal)
+#   web ---------- app ------------- app ---------- db
+#   published on 127.0.0.1:8080      no route to the internet
+#
+# hostnet uses the host's network stack instead of a network of its own.
+
+name: netlab
+
+x-server: &server
+  image: busybox:1.37
+  command: ["httpd", "-f", "-p", "80"]
+
+services:
+  web:
+    <<: *server
+    networks: [frontend]
+    ports:
+      - "127.0.0.1:8080:80"
+
+  app:
+    <<: *server
+    networks: [frontend, backend]
+
+  db:
+    <<: *server
+    networks: [backend]
+
+  hostnet:
+    image: busybox:1.37
+    command: ["httpd", "-f", "-p", "9090"]
+    network_mode: host
+
+networks:
+  frontend:
+  backend:
+    internal: true
